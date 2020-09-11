@@ -266,14 +266,14 @@ struct HalfGridFilling(HalfGridPoly, Filling);
 
 impl Display for HalfGridFilling {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        let mut grid = vec![None; (2 * self.1.width + 1) * (2 * self.1.height + 1)];
+        let mut grid = vec![None; (3 * self.1.width) * (3 * self.1.height)];
 
         for y in 0..self.1.height {
             for x in 0..self.1.width {
                 if let Some(square) = self.1.at(&self.0, x, y) {
                     for dy in 0..=2 {
                         for dx in 0..=2 {
-                            grid[(2 * y + dy) * (2 * self.1.width + 1) + 2 * x + dx] = Some([
+                            grid[(3 * y + dy) * (3 * self.1.width) + 3 * x + dx] = Some([
                                 (square.label(dx, dy) & 0b11_00_00).count_ones(),
                                 (square.label(dx, dy) & 0b00_11_00).count_ones(),
                                 (square.label(dx, dy) & 0b00_00_11).count_ones(),
@@ -284,9 +284,9 @@ impl Display for HalfGridFilling {
             }
         };
 
-        for y in 0..(2 * self.1.height + 1) {
-            for x in 0..(2 * self.1.width + 1) {
-                if let Some(label) = grid[y * (2 * self.1.width + 1) + x] {
+        for y in 0..(3 * self.1.height) {
+            for x in 0..(3 * self.1.width) {
+                if let Some(label) = grid[y * (3 * self.1.width) + x] {
                     write!(f, "{}{}{} ", label[0], label[1], label[2])?;
                 } else {
                     write!(f, "    ")?;
@@ -305,13 +305,54 @@ struct HalfGridPoly {
 }
 
 impl HalfGridPoly {
-    /// Grid must contain padding of `false` around the edges
+    /// Grid must contain 2-cell-thick padding of `false` around the edges
+    /// Grid also contains adjaceny information between each square to support slits.
+    /// So instead of 
+    /// ```notrust
+    ///
+    ///  x
+    ///  xxxx
+    ///  x
+    ///
+    /// ```
+    /// it looks more like
+    /// ```notrust
+    ///   
+    ///
+    ///   x
+    ///   |
+    ///   x-x-x-x
+    ///       |
+    ///       x
+    ///
+    ///
+    /// ```
     fn new(grid: Grid<bool>) -> Self {
         Self { grid }
     }
 
     fn at(&self, x: usize, y: usize) -> bool {
-        *self.grid.at(x, y)
+        *self.grid.at(2 * x, 2 * y)
+    }
+
+    fn connects_left(&self, x: usize, y: usize) -> bool {
+        *self.grid.at(2 * x - 1, 2 * y)
+    }
+
+    fn connects_up_left(&self, x: usize, y: usize) -> bool {
+        self.connects_up(x, y) || self.connects_left(x, y)
+    }
+
+    fn connects_up(&self, x: usize, y: usize) -> bool {
+        *self.grid.at(2 * x, 2 * y - 1)
+    }
+
+    fn connects_up_right(&self, x: usize, y: usize) -> bool {
+        self.connects_up(x, y) || self.connects_right(x, y)
+    }
+    
+    fn connects_right(&self, x: usize, y: usize) -> bool {
+        *self.grid.at(2 * x + 1, 2 * y)
     }
 
     // Constraint indexes
@@ -382,11 +423,12 @@ impl HalfGridPoly {
             |p| [p.labels[0], p.labels[1], p.labels[2], p.labels[3], 0, 0, p.labels[6], 0]
         );
 
-        let on_squares = self.grid.grid.iter().enumerate()
-            .filter(|(_, v)| **v)
-            .map(|(k, _)| (k % self.grid.width, k / self.grid.width)).collect::<Vec<_>>();
+        let on_squares = (0..self.grid.height / 2)
+            .flat_map(|y| (0..self.grid.width / 2).map(move |x| (x, y)))
+            .filter(|(x, y)| self.at(*x, *y))
+            .collect::<Vec<_>>();
 
-        let filling = Filling::default_with_size(self.grid.width, self.grid.height);
+        let filling = Filling::default_with_size(self.grid.width / 2, self.grid.height / 2);
 
         let num_sample_points = on_squares.len() * 16;
 
@@ -417,32 +459,29 @@ impl HalfGridPoly {
         let up_right = filling.0.at(x + 1, y - 1);
         let empty = vec![];
 
-        let possible = if *self.grid.at(x - 1, y) {
-            // Cell on left
-            if *self.grid.at(x, y - 1) {
-                // Cell above
+        let possible = if self.connects_left(x, y) {
+            if self.connects_up(x, y) {
                 // Due to multi-edge interaction, this combination may be not allowed at all.
                 &constraint_map[7].get(&[up.labels[6], up.labels[7], up.labels[8], left.labels[5], 0, 0, left.labels[8], 0]).unwrap_or(&empty)
-            } else if *self.grid.at(x + 1, y - 1) {
-                // Cell above right
+            } else if self.connects_right(x, y) && self.connects_up(x + 1, y) {
+                // Note that `connects_up_right` is not used here. This is because we care about this case
+                // only when the up right square was already filled in, and the right square exists.
+                // (The up square doesn't because we would have caught it in the previous block)
+
                 // Due to multi-edge interaction, this combination may be not allowed at all.
                 &constraint_map[6].get(&[left.labels[2], 0, up_right.labels[6], left.labels[5], 0, 0, left.labels[8], 0]).unwrap_or(&empty)
             } else {
                 &constraint_map[4][&[left.labels[2], 0, 0, left.labels[5], 0, 0, left.labels[8], 0]]
             }
-        } else if *self.grid.at(x, y - 1) {
-            // Cell above
+        } else if self.connects_up(x, y) {
             &constraint_map[5][&[up.labels[6], up.labels[7], up.labels[8], 0, 0, 0, 0, 0]]
-        } else if *self.grid.at(x + 1, y - 1) {
-            // Cell above right
-            if *self.grid.at(x - 1, y - 1) {
-                // Cell above left
+        } else if self.connects_right(x, y) && self.connects_up(x + 1, y){
+            if self.connects_up_left(x, y) {
                 &constraint_map[3][&[up_left.labels[8], 0, up_right.labels[6], 0, 0, 0, 0, 0]]
             } else {
                 &constraint_map[2][&[0, 0, up_right.labels[6], 0, 0, 0, 0, 0]]
             }
-        } else if *self.grid.at(x - 1, y - 1) {
-            // Cell above left
+        } else if self.connects_up_left(x, y) {
             &constraint_map[1][&[up_left.labels[8], 0, 0, 0, 0, 0, 0, 0]]
         } else {
             // Symmetry hack used here
@@ -509,33 +548,34 @@ fn main() {
     //]);
     //println!("Square: {:?}", square);
     
-    println!("Enter a polyomino. x = square, space = blank. For example\nxxx\nx x\nxxx\n\nEnter twice to finish.");
+    println!(concat!("Enter a polyomino. x = square, | = vertical connection, - = horizontal connection, space = blank\n",
+        "For example:\nx-x-x\n|   |\nx   x\n|   |\nx-x-x\n\nEnter twice to finish."));
 
     // Add padding around the grid
-    let mut grid = vec![vec![]];
+    let mut grid = vec![vec![], vec![]];
     while {
         let mut string = String::new();
         io::stdin().read_line(&mut string).expect("Failed to read polyomino");
         let string = string.trim_end();
-        grid.push(string.chars().map(|c| c == 'x').collect::<Vec<_>>());
+        grid.push(string.chars().map(|c| c != ' ').collect::<Vec<_>>());
         !string.is_empty()
     } {}
-    grid.push(vec![]);
+    for _ in 0..3 {
+        grid.push(vec![]);
+    }
     
-    let width = grid.iter().map(|v| v.len()).max().unwrap() + 2;
+    let width = grid.iter().map(|v| v.len()).max().unwrap() + 5;
     // Padding already added
     let height = grid.len();
 
     let grid = HalfGridPoly::new(Grid::new(
         grid.into_iter().flat_map(|v| {
             let len = v.len();
-            iter::once(false).chain(v.into_iter()).chain(iter::repeat(false).take(width - len - 1))
+            vec![false; 2].into_iter().chain(v.into_iter()).chain(iter::repeat(false).take(width - len - 2))
         }).collect(),
         width,
         height
     ));
-
-    dbg!(&grid);
 
     let f = grid.fillings();
     for f in f {
