@@ -9,6 +9,8 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::fmt::{Display, Formatter, Result};
 use cgmath::{Vector3, vec3};
+use std::io::{self, Read};
+use std::iter;
 
 type Vec3u8 = Vector3<u8>;
 
@@ -16,20 +18,20 @@ type Vec3u8 = Vector3<u8>;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 struct HalfGridSquare {
     labels: [u8; 9],
-    // Samples are taken on vertices of a square of an eighth-grid
-    // like so:
+    // Samples are taken like this:
     //
     // @ = sample location
     //
     // Half-grid square
+    // (Slashes delimit areas that must stay flat under the half-grid model)
     // +---------------+
-    // |               |
-    // |   @       @   |
-    // |               |
-    // |               |
-    // |               |
-    // |   @       @   |
-    // |               |
+    // | \           / |
+    // |   \   @   /   |
+    // |     \   /     |
+    // |   @   x   @   |
+    // |     /   \     |
+    // |   /   @   \   |
+    // | /           \ |
     // +---------------+
     //
     // For example (scaled up to avoid fractions),
@@ -37,29 +39,17 @@ struct HalfGridSquare {
     // 000                 004
     //    +---------------+
     //    |               |
-    //    |  011     013  |
+    //    |      012      |
     //    |               |
+    //    |  012     023  |
     //    |               |
-    //    |               |
-    //    |  013     033  |
+    //    |      023      |
     //    |               |
     //    +---------------+
     // 004                 044
     //
     // On a cube, there are a total of 16 x 6 = 96 samples,
     // and they get compressed to numbers from 0 to 96.
-    //
-    // TODO: Rotate sample positions by 45 degrees becase this can happen.
-    //
-    // +---------------+
-    //   \             |
-    //     @       @   |
-    //       \         |
-    //         \       |
-    //       /   \     |
-    //     @       @   |
-    //   /           \ |
-    // +---------------+
     samples: [u8; 16],
 }
 
@@ -79,11 +69,12 @@ impl HalfGridSquare {
         0b11_11_00, 0b11_11_01, 0b11_11_11,
     ];
 
+    /// Calculates the samples on this square.
     fn calc_samples(mut self) -> Self {
         for y in 0..=1 {
             for x in 0..=1 {
                 let sub = [self.label(x, y), self.label(x + 1, y), self.label(x, y + 1), self.label(x + 1, y + 1)];
-                let mut sub = {
+                let sub = {
                     let mut scaled = [vec3(0u8, 0u8, 0u8); 4];
                     for i in 0..4 {
                         scaled[i] = vec3(
@@ -95,35 +86,46 @@ impl HalfGridSquare {
                     scaled
                 };
 
-                // Don't sample using the fold diagonal
+                // Don't sample the middle along a folded diagonal
                 let mid = if sub[0] == sub[3] {
                     (sub[1] + sub[2]) / 2
                 } else {
                     (sub[0] + sub[3]) / 2
                 };
 
-                // Sample halfway to the middle
-                for i in 0..4 {
-                    sub[i] = (sub[i] + mid) / 2
-                }
+                // Sample in a triangle forced to be flat
+                let mut sub = {
+                    let mut new_sub = sub;
+                    for i in 0..4 {
+                        new_sub[i] = (sub[i] + sub[[1, 3, 0, 2][i]] + mid * 2) / 4;
+                    }
+                    new_sub
+                };
+
+                // Now one coordinate is 0 or 8,
+                //     one coordinate is 2 or 6,
+                // and one coordinate is 1, 3, 5, or 7
 
                 // Compress
                 let sub = {
                     let mut compressed = [0u8; 4];
                     for i in 0..4 {
-                        // Get side index
-                        let mut side = 0;
-                        while sub[i].z % 2 == 1 {
+                        while sub[i].z % 8 != 0 {
                             sub[i] = sub[i].yzx();
-                            side += 1;
+                            compressed[i] += 16;
                         }
 
                         if sub[i].z == 0 {
-                            side += 3;
+                            compressed[i] += 48;
+                        }
+
+                        if sub[i].y % 2 == 1 {
+                            sub[i] = sub[i].yxz();
+                            compressed[i] += 8;
                         }
 
                         // Finish compression
-                        compressed[i] = sub[i].x / 2 + sub[i].y / 2 * 4 + side * 16;
+                        compressed[i] += sub[i].x / 2 + sub[i].y / 4 * 4;
                     }
                     compressed
                 };
@@ -137,7 +139,7 @@ impl HalfGridSquare {
     }
 
     fn new(labels: [u8; 9]) -> Self {
-        Self { labels, samples: [0; 16] }.calc_samples()
+        Self { labels, samples: [0; 16] }
     }
 
     fn label(self, x: usize, y: usize) -> u8 {
@@ -146,7 +148,7 @@ impl HalfGridSquare {
 
     fn all_with_sublabels(mut labels: [u8; 9], num_labels: usize) -> Vec<Self> {
         if num_labels == 9 {
-            return vec![Self::new(labels)];
+            return vec![Self::new(labels).calc_samples()];
         }
 
         let x = num_labels % 3;
@@ -158,7 +160,7 @@ impl HalfGridSquare {
             .filter(|p| { 
                 (x == 0 || (Self::label(labels_cloned, x - 1, y) ^ *p).is_power_of_two()) &&
                 (y == 0 || (Self::label(labels_cloned, x, y - 1) ^ *p).is_power_of_two()) &&
-                // No stretching sqrt(2)/2 to 1
+                // No stretching sqrt(2) to 2
                 (x == 0 || y == 0 || {
                     let xor = Self::label(labels_cloned, x - 1, y - 1) ^ *p;
                     (xor & xor >> 1 & 0b01_01_01) == 0
@@ -171,7 +173,24 @@ impl HalfGridSquare {
                 (x == 0 || y == 0 || 
                     Self::label(labels_cloned, x - 1, y - 1) != *p ||
                     Self::label(labels_cloned, x, y - 1) != Self::label(labels_cloned, x - 1, y)
-                )
+                ) &&
+                // Cannot fold from 111
+                (x == 0 || y == 0 || {
+                    let tl = Self::label(labels_cloned, x - 1, y - 1);
+                    let tr = Self::label(labels_cloned, x, y - 1);
+                    let bl = Self::label(labels_cloned, x - 1, y);
+                    let br = *p;
+
+                    (tl != br || {
+                        // See if unfolding the fold would result in a 111
+                        let xor = tr ^ bl ^ tl;
+                        ((xor ^ xor >> 1) & 0b01_01_01) != 0b01_01_01
+                    }) &&
+                    (tr != bl || {
+                        let xor = tl ^ br ^ tr;
+                        ((xor ^ xor >> 1) & 0b01_01_01) != 0b01_01_01
+                    })
+                })
             })
             .flat_map(|p| {
                 labels[num_labels] = p;
@@ -185,21 +204,51 @@ impl HalfGridSquare {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-struct Filling([HalfGridSquare; HalfGridPoly::GRID_W * HalfGridPoly::GRID_H]);
+/// A generic grid of size unknown at compile time
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Grid<T> {
+    grid: Vec<T>,
+    width: usize,
+    height: usize,
+}
+
+impl<T> Grid<T> {
+    fn new(grid: Vec<T>, width: usize, height: usize) -> Self {
+        Self { grid, width, height }
+    }
+
+    fn at(&self, x: usize, y: usize) -> &T {
+        &self.grid[y * self.width + x]
+    }
+
+    fn at_mut(&mut self, x: usize, y: usize) -> &mut T {
+        &mut self.grid[y * self.width + x]
+    }
+
+    fn default_with_size(width: usize, height: usize) -> Self where T: Default + Clone {
+        Self::new(vec![T::default(); width * height], width, height)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Filling(Grid<HalfGridSquare>);
 
 impl Filling {
-    fn at(self, grid: HalfGridPoly, x: usize, y: usize) -> Option<HalfGridSquare> {
+    fn at(&self, grid: &HalfGridPoly, x: usize, y: usize) -> Option<HalfGridSquare> {
         if grid.at(x, y) {
-            Some(self[y * HalfGridPoly::GRID_W + x])
+            Some(*self.0.at(x, y))
         } else {
             None
         }
     }
+
+    fn default_with_size(width: usize, height: usize) -> Self {
+        Filling(Grid::default_with_size(width, height))
+    }
 }
 
 impl Deref for Filling {
-    type Target = [HalfGridSquare; HalfGridPoly::GRID_W * HalfGridPoly::GRID_H];
+    type Target = Grid<HalfGridSquare>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -212,19 +261,19 @@ impl DerefMut for Filling {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct HalfGridFilling(HalfGridPoly, Filling);
 
 impl Display for HalfGridFilling {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        let mut grid = [None; (2 * HalfGridPoly::GRID_W + 1) * (2 * HalfGridPoly::GRID_H + 1)];
+        let mut grid = vec![None; (2 * self.1.width + 1) * (2 * self.1.height + 1)];
 
-        for y in 0..HalfGridPoly::GRID_H {
-            for x in 0..HalfGridPoly::GRID_W {
-                if let Some(square) = self.1.at(self.0, x, y) {
+        for y in 0..self.1.height {
+            for x in 0..self.1.width {
+                if let Some(square) = self.1.at(&self.0, x, y) {
                     for dy in 0..=2 {
                         for dx in 0..=2 {
-                            grid[(2 * y + dy) * (2 * HalfGridPoly::GRID_W + 1) + 2 * x + dx] = Some([
+                            grid[(2 * y + dy) * (2 * self.1.width + 1) + 2 * x + dx] = Some([
                                 (square.label(dx, dy) & 0b11_00_00).count_ones(),
                                 (square.label(dx, dy) & 0b00_11_00).count_ones(),
                                 (square.label(dx, dy) & 0b00_00_11).count_ones(),
@@ -235,9 +284,9 @@ impl Display for HalfGridFilling {
             }
         };
 
-        for y in 0..(2 * HalfGridPoly::GRID_H + 1) {
-            for x in 0..(2 * HalfGridPoly::GRID_W + 1) {
-                if let Some(label) = grid[y * (2 * HalfGridPoly::GRID_W + 1) + x] {
+        for y in 0..(2 * self.1.height + 1) {
+            for x in 0..(2 * self.1.width + 1) {
+                if let Some(label) = grid[y * (2 * self.1.width + 1) + x] {
                     write!(f, "{}{}{} ", label[0], label[1], label[2])?;
                 } else {
                     write!(f, "    ")?;
@@ -250,22 +299,19 @@ impl Display for HalfGridFilling {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct HalfGridPoly {
-    grid: [bool; Self::GRID_W * Self::GRID_H],
+    grid: Grid<bool>,
 }
 
 impl HalfGridPoly {
-    const GRID_W: usize = 6;
-    const GRID_H: usize = 5;
-
     /// Grid must contain padding of `false` around the edges
-    fn new(grid: [bool; Self::GRID_W * Self::GRID_H]) -> Self {
+    fn new(grid: Grid<bool>) -> Self {
         Self { grid }
     }
 
-    fn at(self, x: usize, y: usize) -> bool {
-        self.grid[y * Self::GRID_W + x]
+    fn at(&self, x: usize, y: usize) -> bool {
+        *self.grid.at(x, y)
     }
 
     // Constraint indexes
@@ -276,7 +322,7 @@ impl HalfGridPoly {
     // 4: 0 . .  5: 0 1 2  6: 0 . 2  7: 0 1 2
     //    3 . .     . . .     3 . .     3 . .
     //    6 . .     . . .     6 . .     6 . .
-    fn fillings(self) -> Vec<Filling> {
+    fn fillings(&self) -> Vec<Filling> {
         let possible = HalfGridSquare::all_possible();
 
         let mut constraint_map = <[FnvHashMap<[u8; 8], Vec<HalfGridSquare>>; 8]>::default();
@@ -336,11 +382,11 @@ impl HalfGridPoly {
             |p| [p.labels[0], p.labels[1], p.labels[2], p.labels[3], 0, 0, p.labels[6], 0]
         );
 
-        let on_squares = self.grid.iter().enumerate()
+        let on_squares = self.grid.grid.iter().enumerate()
             .filter(|(_, v)| **v)
-            .map(|(k, _)| k).collect::<Vec<_>>();
+            .map(|(k, _)| (k % self.grid.width, k / self.grid.width)).collect::<Vec<_>>();
 
-        let mut filling = Filling::default();
+        let filling = Filling::default_with_size(self.grid.width, self.grid.height);
 
         let num_sample_points = on_squares.len() * 16;
 
@@ -351,51 +397,51 @@ impl HalfGridPoly {
     }
 
     fn fillings_helper(
-        self,
+        &self,
         filling: &Filling,
-        on_squares: &[usize],
+        on_squares: &[(usize, usize)],
         curr_on_square_index: usize,
         constraint_map: &[FnvHashMap<[u8; 8], Vec<HalfGridSquare>>; 8],
         mut num_sample_points: usize,
         mentioned: u128,
     ) -> Vec<Filling> {
         if curr_on_square_index >= on_squares.len() {
-            return vec![*filling];
+            return vec![filling.clone()];
         }
 
-        let index = on_squares[curr_on_square_index];
+        let (x, y) = on_squares[curr_on_square_index];
         
-        let up = filling[index - Self::GRID_W];
-        let left = filling[index - 1];
-        let up_left = filling[index - Self::GRID_W - 1];
-        let up_right = filling[index - Self::GRID_W + 1];
+        let up = filling.0.at(x, y - 1);
+        let left = filling.0.at(x - 1, y);
+        let up_left = filling.0.at(x - 1, y - 1);
+        let up_right = filling.0.at(x + 1, y - 1);
         let empty = vec![];
 
-        let possible = if self.grid[index - 1] {
+        let possible = if *self.grid.at(x - 1, y) {
             // Cell on left
-            if self.grid[index - Self::GRID_W] {
+            if *self.grid.at(x, y - 1) {
                 // Cell above
                 // Due to multi-edge interaction, this combination may be not allowed at all.
                 &constraint_map[7].get(&[up.labels[6], up.labels[7], up.labels[8], left.labels[5], 0, 0, left.labels[8], 0]).unwrap_or(&empty)
-            } else if self.grid[index - Self::GRID_W + 1] {
+            } else if *self.grid.at(x + 1, y - 1) {
                 // Cell above right
                 // Due to multi-edge interaction, this combination may be not allowed at all.
                 &constraint_map[6].get(&[left.labels[2], 0, up_right.labels[6], left.labels[5], 0, 0, left.labels[8], 0]).unwrap_or(&empty)
             } else {
                 &constraint_map[4][&[left.labels[2], 0, 0, left.labels[5], 0, 0, left.labels[8], 0]]
             }
-        } else if self.grid[index - Self::GRID_W] {
+        } else if *self.grid.at(x, y - 1) {
             // Cell above
             &constraint_map[5][&[up.labels[6], up.labels[7], up.labels[8], 0, 0, 0, 0, 0]]
-        } else if self.grid[index - Self::GRID_W + 1] {
+        } else if *self.grid.at(x + 1, y - 1) {
             // Cell above right
-            if self.grid[index - Self::GRID_W - 1] {
+            if *self.grid.at(x - 1, y - 1) {
                 // Cell above left
                 &constraint_map[3][&[up_left.labels[8], 0, up_right.labels[6], 0, 0, 0, 0, 0]]
             } else {
                 &constraint_map[2][&[0, 0, up_right.labels[6], 0, 0, 0, 0, 0]]
             }
-        } else if self.grid[index - Self::GRID_W - 1] {
+        } else if *self.grid.at(x - 1, y - 1) {
             // Cell above left
             &constraint_map[1][&[up_left.labels[8], 0, 0, 0, 0, 0, 0, 0]]
         } else {
@@ -406,7 +452,7 @@ impl HalfGridPoly {
         num_sample_points -= 16;
 
         if curr_on_square_index == 0 {
-            let mut count = AtomicUsize::new(0);
+            let count = AtomicUsize::new(0);
             possible.par_iter().flat_map(|p| {
                 let new_count = count.fetch_add(1, Ordering::SeqCst);
                 eprintln!("{}/{}", new_count, possible.len());
@@ -421,11 +467,14 @@ impl HalfGridPoly {
                     return vec![]
                 }
 
-                let mut filling = *filling;
-                filling[index] = *p;
+                let mut filling = filling.clone();
+                *filling.0.at_mut(x, y) = *p;
                 self.fillings_helper(&filling, on_squares, curr_on_square_index + 1, constraint_map, num_sample_points, mentioned)
             }).collect()
         } else {
+            // This is done in series, so modifying is fine
+            let mut filling = filling.clone();
+
             possible.iter().flat_map(|p| {
                 let mut mentioned = mentioned;
 
@@ -438,8 +487,7 @@ impl HalfGridPoly {
                     return vec![]
                 }
 
-                let mut filling = *filling;
-                filling[index] = *p;
+                *filling.0.at_mut(x, y) = *p;
                 self.fillings_helper(&filling, on_squares, curr_on_square_index + 1, constraint_map, num_sample_points, mentioned)
             }).collect()
         }
@@ -454,22 +502,43 @@ fn main() {
 
     //println!("Possibility count: {:?}", num);
 
-    //let square = dbg!(HalfGridSquare::new([
+    //let square = HalfGridSquare::new([
     //    0b_00_00_11, 0b_00_01_11, 0b_00_00_11,
     //    0b_00_01_11, 0b_01_01_11, 0b_00_01_11,
     //    0b_00_00_11, 0b_00_01_11, 0b_00_11_11,
-    //]));
+    //]);
+    //println!("Square: {:?}", square);
+    
+    println!("Enter a polyomino. x = square, space = blank. For example\nxxx\nx x\nxxx\n\nEnter twice to finish.");
 
-    let grid = HalfGridPoly::new([
-        false, false, false, false, false, false,
-        false, false, true , false, false, false,
-        false, true , true , true , true , false,
-        false, false, true , false, false, false,
-        false, false, false, false, false, false,
-    ]);
+    // Add padding around the grid
+    let mut grid = vec![vec![]];
+    while {
+        let mut string = String::new();
+        io::stdin().read_line(&mut string).expect("Failed to read polyomino");
+        let string = string.trim_end();
+        grid.push(string.chars().map(|c| c == 'x').collect::<Vec<_>>());
+        !string.is_empty()
+    } {}
+    grid.push(vec![]);
+    
+    let width = grid.iter().map(|v| v.len()).max().unwrap() + 2;
+    // Padding already added
+    let height = grid.len();
+
+    let grid = HalfGridPoly::new(Grid::new(
+        grid.into_iter().flat_map(|v| {
+            let len = v.len();
+            iter::once(false).chain(v.into_iter()).chain(iter::repeat(false).take(width - len - 1))
+        }).collect(),
+        width,
+        height
+    ));
+
+    dbg!(&grid);
 
     let f = grid.fillings();
     for f in f {
-        println!("Filling: {}", HalfGridFilling(grid, f));
+        println!("Filling: {}", HalfGridFilling(grid.clone(), f));
     }
 }
