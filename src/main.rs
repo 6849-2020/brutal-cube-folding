@@ -231,24 +231,16 @@ impl<T> Grid<T> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Filling(Grid<HalfGridSquare>);
+struct Filling(Grid<Option<HalfGridSquare>>);
 
 impl Filling {
-    fn at(&self, grid: &HalfGridPoly, x: usize, y: usize) -> Option<HalfGridSquare> {
-        if grid.at(x, y) {
-            Some(*self.0.at(x, y))
-        } else {
-            None
-        }
-    }
-
     fn default_with_size(width: usize, height: usize) -> Self {
         Filling(Grid::default_with_size(width, height))
     }
 }
 
 impl Deref for Filling {
-    type Target = Grid<HalfGridSquare>;
+    type Target = Grid<Option<HalfGridSquare>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -270,7 +262,7 @@ impl Display for HalfGridFilling {
 
         for y in 0..self.1.height {
             for x in 0..self.1.width {
-                if let Some(square) = self.1.at(&self.0, x, y) {
+                if let Some(square) = self.1.at(x, y) {
                     for dy in 0..=2 {
                         for dx in 0..=2 {
                             grid[(3 * y + dy) * (3 * self.1.width) + 3 * x + dx] = Some([
@@ -339,39 +331,45 @@ impl HalfGridPoly {
         *self.grid.at(2 * x - 1, 2 * y)
     }
 
-    fn connects_up_left(&self, x: usize, y: usize) -> bool {
-        self.connects_up(x, y) || self.connects_left(x, y)
-    }
-
     fn connects_up(&self, x: usize, y: usize) -> bool {
         *self.grid.at(2 * x, 2 * y - 1)
     }
 
-    fn connects_up_right(&self, x: usize, y: usize) -> bool {
-        self.connects_up(x, y) || self.connects_right(x, y)
-    }
-    
     fn connects_right(&self, x: usize, y: usize) -> bool {
         *self.grid.at(2 * x + 1, 2 * y)
     }
 
-    // Constraint indexes
-    // 0: . . .  1: 0 . .  2: . . 2  3: 0 . 2
-    //    . . .     . . .     . . .     . . .
-    //    . . .     . . .     . . .     . . .
+    fn connects_down(&self, x: usize, y: usize) -> bool {
+        *self.grid.at(2 * x, 2 * y + 1)
+    }
+
+    // Constraint map edges:
+    //       1 
+    //   +-------+
+    //   |       |
+    // 2 |       | 8
+    //   |       |
+    //   +-------+
+    //       4
     //
-    // 4: 0 . .  5: 0 1 2  6: 0 . 2  7: 0 1 2
-    //    3 . .     . . .     3 . .     3 . .
-    //    6 . .     . . .     6 . .     6 . .
+    // Constraint map indexes
+    //   0   1   2  
+    // 3 +-------+ 9 
+    //   |       |   
+    // 4 |       | 10
+    //   |       |   
+    // 5 +-------+ 11 
+    //   6   7   8   
+
     fn fillings(&self) -> Vec<Filling> {
         let possible = HalfGridSquare::all_possible();
 
-        let mut constraint_map = <[FnvHashMap<[u8; 8], Vec<HalfGridSquare>>; 8]>::default();
+        let mut constraint_map = <[FnvHashMap<[u8; 12], Vec<HalfGridSquare>>; 16]>::default();
 
         fn build_constraints(
             possible: &[HalfGridSquare], 
-            constraint_fn: impl Fn(HalfGridSquare) -> [u8; 8])
-        -> FnvHashMap<[u8; 8], Vec<HalfGridSquare>> {
+            constraint_fn: impl Fn(HalfGridSquare) -> [u8; 12])
+        -> FnvHashMap<[u8; 12], Vec<HalfGridSquare>> {
 
             let mut map = FnvHashMap::default();
             for p in possible.iter() {
@@ -380,48 +378,44 @@ impl HalfGridPoly {
             map
         }
 
-        constraint_map[0].insert([0; 8], possible.clone());
+        constraint_map[0].insert([0; 12], possible.clone());
         // Symmetry reduction hack
-        constraint_map[0].insert([1; 8], possible.iter().filter(|p| {
+        constraint_map[0].insert([1; 12], possible.iter().filter(|p| {
             (p.labels[0] == 0b00_00_00 && p.labels[1] == 0b00_00_01) ||
             (p.labels[0] == 0b00_00_01 && (p.labels[1] == 0b00_00_00 || p.labels[1] == 0b00_01_01)) ||
             (p.labels[0] == 0b00_01_01 && p.labels[1] == 0b00_00_01)
         }).copied().collect());
 
-        constraint_map[1] = build_constraints(
-            &possible, 
-            |p| [p.labels[0], 0, 0, 0, 0, 0, 0, 0]
-        );
-
-        constraint_map[2] = build_constraints(
-            &possible, 
-            |p| [0, 0, p.labels[2], 0, 0, 0, 0, 0]
-        );
-
-        constraint_map[3] = build_constraints(
-            &possible, 
-            |p| [p.labels[0], 0, p.labels[2], 0, 0, 0, 0, 0]
-        );
-
-        constraint_map[4] = build_constraints(
-            &possible, 
-            |p| [p.labels[0], 0, 0, p.labels[3], 0, 0, p.labels[6], 0]
-        );
-
-        constraint_map[5] = build_constraints(
-            &possible, 
-            |p| [p.labels[0], p.labels[1], p.labels[2], 0, 0, 0, 0, 0]
-        );
-
-        constraint_map[6] = build_constraints(
-            &possible, 
-            |p| [p.labels[0], 0, p.labels[2], p.labels[3], 0, 0, p.labels[6], 0]
-        );
-
-        constraint_map[7] = build_constraints(
-            &possible, 
-            |p| [p.labels[0], p.labels[1], p.labels[2], p.labels[3], 0, 0, p.labels[6], 0]
-        );
+        // Store maps from constraints to half-grid squares that satisfy those constraints
+        for i in 1..16 {
+            constraint_map[i] = build_constraints(
+                &possible,
+                |p| {
+                    let mut labels = [0u8; 12];
+                    if (i & 1) != 0 {
+                        labels[0] = p.label(0, 0);
+                        labels[1] = p.label(1, 0);
+                        labels[2] = p.label(2, 0);
+                    }
+                    if (i & 2) != 0 {
+                        labels[3] = p.label(0, 0);
+                        labels[4] = p.label(0, 1);
+                        labels[5] = p.label(0, 2);
+                    }
+                    if (i & 4) != 0 {
+                        labels[6] = p.label(0, 2);
+                        labels[7] = p.label(1, 2);
+                        labels[8] = p.label(2, 2);
+                    }
+                    if (i & 8) != 0 {
+                        labels[9]  = p.label(2, 0);
+                        labels[10] = p.label(2, 1);
+                        labels[11] = p.label(2, 2);
+                    }
+                    labels
+                }
+            )
+        }
 
         let on_squares = (0..self.grid.height / 2)
             .flat_map(|y| (0..self.grid.width / 2).map(move |x| (x, y)))
@@ -443,7 +437,7 @@ impl HalfGridPoly {
         filling: &Filling,
         on_squares: &[(usize, usize)],
         curr_on_square_index: usize,
-        constraint_map: &[FnvHashMap<[u8; 8], Vec<HalfGridSquare>>; 8],
+        constraint_map: &[FnvHashMap<[u8; 12], Vec<HalfGridSquare>>; 16],
         mut num_sample_points: usize,
         mentioned: u128,
     ) -> Vec<Filling> {
@@ -453,40 +447,50 @@ impl HalfGridPoly {
 
         let (x, y) = on_squares[curr_on_square_index];
         
-        let up = filling.0.at(x, y - 1);
-        let left = filling.0.at(x - 1, y);
-        let up_left = filling.0.at(x - 1, y - 1);
-        let up_right = filling.0.at(x + 1, y - 1);
+        // Get constraints
+        let mut constraint_index = 0;
+        let mut constraint = [0u8; 12];
+
+        if self.connects_up(x, y) {
+            if let Some(square) = filling.at(x, y - 1) {
+                constraint_index |= 1;
+                constraint[0] = square.label(0, 2);
+                constraint[1] = square.label(1, 2);
+                constraint[2] = square.label(2, 2);
+            }
+        }
+        if self.connects_left(x, y) {
+            if let Some(square) = filling.at(x - 1, y) {
+                constraint_index |= 2;
+                constraint[3] = square.label(2, 0);
+                constraint[4] = square.label(2, 1);
+                constraint[5] = square.label(2, 2);
+            }
+        }
+        if self.connects_down(x, y) {
+            if let Some(square) = filling.at(x, y + 1) {
+                constraint_index |= 4;
+                constraint[6] = square.label(0, 0);
+                constraint[7] = square.label(1, 0);
+                constraint[8] = square.label(2, 0);
+            }
+        }
+        if self.connects_right(x, y) {
+            if let Some(square) = filling.at(x + 1, y) {
+                constraint_index |= 8;
+                constraint[9]  = square.label(0, 0);
+                constraint[10] = square.label(0, 1);
+                constraint[11] = square.label(0, 2);
+            }
+        }
+
+        // Symmetry hack application. Apply only on the very first square filled in
+        if constraint_index == 0 && curr_on_square_index == 0 {
+            constraint = [1u8; 12];
+        }
+
         let empty = vec![];
-
-        let possible = if self.connects_left(x, y) {
-            if self.connects_up(x, y) {
-                // Due to multi-edge interaction, this combination may be not allowed at all.
-                &constraint_map[7].get(&[up.labels[6], up.labels[7], up.labels[8], left.labels[5], 0, 0, left.labels[8], 0]).unwrap_or(&empty)
-            } else if self.connects_right(x, y) && self.connects_up(x + 1, y) {
-                // Note that `connects_up_right` is not used here. This is because we care about this case
-                // only when the up right square was already filled in, and the right square exists.
-                // (The up square doesn't because we would have caught it in the previous block)
-
-                // Due to multi-edge interaction, this combination may be not allowed at all.
-                &constraint_map[6].get(&[left.labels[2], 0, up_right.labels[6], left.labels[5], 0, 0, left.labels[8], 0]).unwrap_or(&empty)
-            } else {
-                &constraint_map[4][&[left.labels[2], 0, 0, left.labels[5], 0, 0, left.labels[8], 0]]
-            }
-        } else if self.connects_up(x, y) {
-            &constraint_map[5][&[up.labels[6], up.labels[7], up.labels[8], 0, 0, 0, 0, 0]]
-        } else if self.connects_right(x, y) && self.connects_up(x + 1, y){
-            if self.connects_up_left(x, y) {
-                &constraint_map[3][&[up_left.labels[8], 0, up_right.labels[6], 0, 0, 0, 0, 0]]
-            } else {
-                &constraint_map[2][&[0, 0, up_right.labels[6], 0, 0, 0, 0, 0]]
-            }
-        } else if self.connects_up_left(x, y) {
-            &constraint_map[1][&[up_left.labels[8], 0, 0, 0, 0, 0, 0, 0]]
-        } else {
-            // Symmetry hack used here
-            &constraint_map[0][if curr_on_square_index == 0 {&[1; 8]} else {&[0; 8]}]
-        };
+        let possible = constraint_map[constraint_index].get(&constraint).unwrap_or(&empty);
 
         num_sample_points -= 16;
 
@@ -507,7 +511,7 @@ impl HalfGridPoly {
                 }
 
                 let mut filling = filling.clone();
-                *filling.0.at_mut(x, y) = *p;
+                *filling.0.at_mut(x, y) = Some(*p);
                 self.fillings_helper(&filling, on_squares, curr_on_square_index + 1, constraint_map, num_sample_points, mentioned)
             }).collect()
         } else {
@@ -526,7 +530,7 @@ impl HalfGridPoly {
                     return vec![]
                 }
 
-                *filling.0.at_mut(x, y) = *p;
+                *filling.0.at_mut(x, y) = Some(*p);
                 self.fillings_helper(&filling, on_squares, curr_on_square_index + 1, constraint_map, num_sample_points, mentioned)
             }).collect()
         }
