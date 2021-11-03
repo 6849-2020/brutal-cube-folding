@@ -557,12 +557,12 @@ impl HalfGridPoly {
         num_sample_points -= 16;
 
         if curr_on_square_index == 0 {
-            let count = AtomicUsize::new(0);
+            //let count = AtomicUsize::new(0);
             possible
                 .par_iter()
                 .flat_map(|p| {
-                    let new_count = count.fetch_add(1, Ordering::SeqCst);
-                    eprintln!("{}/{}", new_count, possible.len());
+                    //let new_count = count.fetch_add(1, Ordering::SeqCst);
+                    //eprintln!("{}/{}", new_count, possible.len());
                     let mut mentioned = mentioned;
 
                     for sample in p.samples.iter() {
@@ -585,7 +585,7 @@ impl HalfGridPoly {
                         mentioned,
                     )
                 })
-                .collect()
+                .find_any(|_| true).into_iter().collect()
         } else {
             // This is done in series, so modifying is fine
             let mut filling = filling.clone();
@@ -614,7 +614,7 @@ impl HalfGridPoly {
                         mentioned,
                     )
                 })
-                .collect()
+                .next().into_iter().collect()
         }
     }
 }
@@ -634,44 +634,57 @@ fn main() {
     //]);
     //println!("Square: {:?}", square);
 
-    println!(concat!("Enter a polyomino. x = square, | = vertical connection, - = horizontal connection, space = blank\n",
-        "For example:\nx-x-x\n|   |\nx   x\n|   |\nx-x-x\n\nEnter twice to finish."));
+    //println!(concat!("Enter a polyomino. x = square, | = vertical connection, - = horizontal connection, space = blank\n",
+    //    "For example:\nx-x-x\n|   |\nx   x\n|   |\nx-x-x\n\nEnter twice to finish."));
 
-    // Add padding around the grid
-    let mut grid = vec![vec![], vec![]];
-    while {
-        let mut string = String::new();
-        io::stdin()
-            .read_line(&mut string)
-            .expect("Failed to read polyomino");
-        let string = string.trim_end();
-        grid.push(string.chars().map(|c| c != ' ').collect::<Vec<_>>());
-        !string.is_empty()
-    } {}
-    for _ in 0..3 {
-        grid.push(vec![]);
+    let mut string = String::new();
+    io::stdin().read_to_string(&mut string).expect("Failed to read input");
+
+    let mut grids = vec![];
+
+    for grid_str in string.split("\n\n") {
+        if grid_str.trim().is_empty() {
+            continue;
+        }
+
+        // Add padding around the grid
+        let mut grid = vec![vec![], vec![]];
+        for line in grid_str.lines() {
+            let string = line.trim_end();
+            grid.push(string.chars().map(|c| c != ' ').collect::<Vec<_>>());
+        }
+        for _ in 0..3 {
+            grid.push(vec![]);
+        }
+
+        let width = grid.iter().map(|v| v.len()).max().unwrap() + 5;
+        // Padding already added
+        let height = grid.len();
+
+        let grid = HalfGridPoly::new(Grid::new(
+            grid.into_iter()
+                .flat_map(|v| {
+                    let len = v.len();
+                    vec![false; 2]
+                        .into_iter()
+                        .chain(v.into_iter())
+                        .chain(iter::repeat(false).take(width - len - 2))
+                })
+                .collect(),
+            width,
+            height,
+        ));
+
+        grids.push(grid);
     }
 
-    let width = grid.iter().map(|v| v.len()).max().unwrap() + 5;
-    // Padding already added
-    let height = grid.len();
+    let len = grids.len();
+    for (i, grid) in grids.into_iter().enumerate() {
+        println!("{}/{}", i, len);
 
-    let grid = HalfGridPoly::new(Grid::new(
-        grid.into_iter()
-            .flat_map(|v| {
-                let len = v.len();
-                vec![false; 2]
-                    .into_iter()
-                    .chain(v.into_iter())
-                    .chain(iter::repeat(false).take(width - len - 2))
-            })
-            .collect(),
-        width,
-        height,
-    ));
-
-    let f = grid.fillings();
-    for f in f {
-        println!("Filling: {}", HalfGridFilling(grid.clone(), f));
+        let f = grid.fillings();
+        for f in f {
+            println!("Filling: {}", HalfGridFilling(grid.clone(), f));
+        }
     }
 }
